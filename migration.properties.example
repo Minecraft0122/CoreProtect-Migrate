@@ -1,0 +1,13 @@
+# Database Migration Configuration
+# SQLite Path (source)
+source.type=sqlite
+source.url=file:./coreprotect.db
+source.user=
+source.password=
+
+# MySQL Connection (target)
+target.type=mysql
+target.url=jdbc:mysql://localhost:3306/coreprotect
+target.user=root
+target.password=your_password_here
+target.prefix=
