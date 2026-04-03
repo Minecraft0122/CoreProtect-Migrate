@@ -1,9 +1,10 @@
+package com.coremigrate;
+
 import java.io.*;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 
 public class DatabaseMigrator {
     private static final String CONFIG_FILE = "migration.properties";
@@ -133,7 +134,8 @@ public class DatabaseMigrator {
         
         // 为每张表启动迁移
         for (String table : tables) {
-            futures.add(executor.submit(() -> migrateTable(table)));
+            final String tableName = table.trim();
+            futures.add(executor.submit(() -> migrateTable(tableName)));
         }
         
         // 显示进度
@@ -212,76 +214,79 @@ public class DatabaseMigrator {
         int batchCount = 0;
         
         // 获取表结构信息
-        ResultSetMetaData metaData = sourceConnection.getMetaData();
-        ResultSet columns = metaData.getColumns(null, null, table, null);
-        
-        List<String> columnNames = new ArrayList<>();
-        while (columns.next()) {
-            columnNames.add(columns.getString("COLUMN_NAME"));
-        }
-        columns.close();
-        
-        // 准备插入语句
-        String columnsList = String.join(", ", columnNames);
-        String placeholders = String.join(", ", Collections.nCopies(columnNames.size(), "?"));
-        String insertQuery = "INSERT INTO " + table + " (" + columnsList + ") VALUES (" + placeholders + ")";
-        
-        try (PreparedStatement insertStmt = targetConnection.prepareStatement(insertQuery)) {
-            insertStmt.setQueryTimeout(3600);
+        try (Statement stmt = sourceConnection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT * FROM " + table + " LIMIT 1")) {
             
-            // 迁移数据
-            long lastId = 0;
-            int batchStart = 0;
-            int batchEnd = batchSize;
+            ResultSetMetaData metaData = rs.getMetaData();
+            int columnCount = metaData.getColumnCount();
             
-            while (batchStart < totalCount) {
-                // 获取当前批次数据
-                String selectQuery = "SELECT * FROM " + table + " WHERE id > ? LIMIT ?";
-                try (PreparedStatement selectStmt = sourceConnection.prepareStatement(selectQuery)) {
-                    selectStmt.setLong(1, lastId);
-                    selectStmt.setInt(2, batchSize);
-                    
-                    try (ResultSet rs = selectStmt.executeQuery()) {
-                        // 处理结果集
-                        while (rs.next()) {
-                            // 设置插入参数
-                            for (int i = 1; i <= columnNames.size(); i++) {
-                                insertStmt.setObject(i, rs.getObject(i));
-                            }
-                            
-                            insertStmt.addBatch();
-                            processedCount++;
-                            lastId = rs.getLong("id");
-                            
-                            // 执行批次
-                            if (++batchCount >= batchSize) {
-                                insertStmt.executeBatch();
-                                insertStmt.clearBatch();
-                                batchCount = 0;
+            List<String> columnNames = new ArrayList<>();
+            for (int i = 1; i <= columnCount; i++) {
+                columnNames.add(metaData.getColumnName(i));
+            }
+            
+            // 准备插入语句
+            String columnsList = String.join(", ", columnNames);
+            String placeholders = String.join(", ", Collections.nCopies(columnNames.size(), "?"));
+            String insertQuery = "INSERT INTO " + table + " (" + columnsList + ") VALUES (" + placeholders + ")";
+            
+            try (PreparedStatement insertStmt = targetConnection.prepareStatement(insertQuery)) {
+                insertStmt.setQueryTimeout(3600);
+                
+                // 迁移数据
+                long lastId = 0;
+                int batchStart = 0;
+                int batchEnd = batchSize;
+                
+                while (batchStart < totalCount) {
+                    // 获取当前批次数据
+                    String selectQuery = "SELECT * FROM " + table + " WHERE id > ? LIMIT ?";
+                    try (PreparedStatement selectStmt = sourceConnection.prepareStatement(selectQuery)) {
+                        selectStmt.setLong(1, lastId);
+                        selectStmt.setInt(2, batchSize);
+                        
+                        try (ResultSet resultSet = selectStmt.executeQuery()) {
+                            // 处理结果集
+                            while (resultSet.next()) {
+                                // 设置插入参数
+                                for (int i = 1; i <= columnNames.size(); i++) {
+                                    insertStmt.setObject(i, resultSet.getObject(i));
+                                }
+                                
+                                insertStmt.addBatch();
+                                processedCount++;
+                                lastId = resultSet.getLong("id");
+                                
+                                // 执行批次
+                                if (++batchCount >= batchSize) {
+                                    insertStmt.executeBatch();
+                                    insertStmt.clearBatch();
+                                    batchCount = 0;
+                                }
                             }
                         }
                     }
+                    
+                    // 更新进度
+                    progressMap.get(table).set(processedCount);
+                    
+                    // 调整批处理大小
+                    if (processedCount > 0 && batchStart % 10000 == 0) {
+                        System.out.println("Migrated " + processedCount + " records for table " + table);
+                    }
+                    
+                    batchStart = batchEnd;
+                    batchEnd = Math.min(batchStart + batchSize, totalCount);
                 }
                 
-                // 更新进度
-                progressMap.get(table).set(processedCount);
-                
-                // 调整批处理大小
-                if (processedCount > 0 && batchStart % 10000 == 0) {
-                    System.out.println("Migrated " + processedCount + " records for table " + table);
+                // 处理最后一批
+                if (batchCount > 0) {
+                    insertStmt.executeBatch();
                 }
                 
-                batchStart = batchEnd;
-                batchEnd = Math.min(batchStart + batchSize, totalCount);
+                System.out.println("Completed migration for table " + table + " (" + processedCount + " records)");
+                return processedCount;
             }
-            
-            // 处理最后一批
-            if (batchCount > 0) {
-                insertStmt.executeBatch();
-            }
-            
-            System.out.println("Completed migration for table " + table + " (" + processedCount + " records)");
-            return processedCount;
         }
     }
 
@@ -310,6 +315,16 @@ public class DatabaseMigrator {
             for (int i = 1; i <= columnCount; i++) {
                 String columnName = metaData.getColumnName(i);
                 String columnType = metaData.getColumnTypeName(i);
+                
+                // 处理MySQL类型映射
+                if (targetConnection.getMetaData().getDatabaseProductName().toLowerCase().contains("mysql")) {
+                    if (columnType.equalsIgnoreCase("INTEGER")) {
+                        columnType = "INT";
+                    } else if (columnType.equalsIgnoreCase("VARCHAR")) {
+                        columnType = "VARCHAR(255)";
+                    }
+                }
+                
                 createQuery.append(columnName).append(" ").append(columnType);
                 if (i < columnCount) createQuery.append(", ");
             }
@@ -373,7 +388,7 @@ public class DatabaseMigrator {
     }
 
     public static void main(String[] args) {
-        System.out.println("CoreProtect Database Migration Tool v1.0");
+        System.out.println("CoreMigrate Database Migration Tool v1.0");
         System.out.println("=====================================");
         
         try {
@@ -381,6 +396,7 @@ public class DatabaseMigrator {
         } catch (Exception e) {
             System.err.println("Migration failed: " + e.getMessage());
             e.printStackTrace();
+            System.exit(1);
         }
     }
 }
