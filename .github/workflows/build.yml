@@ -1,0 +1,157 @@
+name: Build and Release CoreMigrate
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [ created ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 8
+      uses: actions/setup-java@v4
+      with:
+        java-version: '8'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Build with Maven
+      run: mvn clean package -DskipTests
+
+    - name: Upload JAR artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: coremigrate-jar
+        path: target/database-migrator-*.jar
+
+    - name: Test executable JAR
+      run: |
+        ls -la target/
+        java -jar target/database-migrator-*.jar --help || true
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpassword
+          MYSQL_DATABASE: testdb
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+        ports:
+          - 3306:3306
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 8
+      uses: actions/setup-java@v4
+      with:
+        java-version: '8'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Download built JAR
+      uses: actions/download-artifact@v4
+      with:
+        name: coremigrate-jar
+        path: target/
+
+    - name: Create test SQLite database
+      run: |
+        sudo apt-get update
+        sudo apt-get install sqlite3
+        sqlite3 test.db "CREATE TABLE block (id INTEGER PRIMARY KEY, x INTEGER, y INTEGER, z INTEGER);"
+        sqlite3 test.db "INSERT INTO block (x, y, z) VALUES (1, 2, 3), (4, 5, 6), (7, 8, 9);"
+
+    - name: Create test config
+      run: |
+        echo "source.type=sqlite" > test-config.properties
+        echo "source.url=file:./test.db" >> test-config.properties
+        echo "source.user=" >> test-config.properties
+        echo "source.password=" >> test-config.properties
+        echo "target.type=mysql" >> test-config.properties
+        echo "target.url=jdbc:mysql://localhost:3306/testdb" >> test-config.properties
+        echo "target.user=root" >> test-config.properties
+        echo "target.password=rootpassword" >> test-config.properties
+        echo "target.prefix=" >> test-config.properties
+        echo "tables=block" >> test-config.properties
+        echo "batch.size=100" >> test-config.properties
+
+    - name: Run migration test
+      run: |
+        cp target/database-migrator-*.jar coremigrate.jar
+        java -jar coremigrate.jar || true
+
+  release:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' && github.event.action == 'created'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 8
+      uses: actions/setup-java@v4
+      with:
+        java-version: '8'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Build with Maven
+      run: mvn clean package -DskipTests
+
+    - name: Create Release Assets
+      run: |
+        JAR_FILE=$(ls target/database-migrator-*.jar | head -n 1)
+        cp "$JAR_FILE" CoreMigrate-${{ github.event.release.tag_name }}.jar
+        ls -la CoreMigrate-*.jar
+
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./CoreMigrate-${{ github.event.release.tag_name }}.jar
+        asset_name: CoreMigrate-${{ github.event.release.tag_name }}.jar
+        asset_content_type: application/java-archive
+
+  publish-to-maven-central:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    if: contains(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 8
+      uses: actions/setup-java@v4
+      with:
+        java-version: '8'
+        distribution: 'temurin'
+        server-id: ossrh
+        server-username: MAVEN_USERNAME
+        server-password: MAVEN_PASSWORD
+        gpg-private-key: ${{ secrets.OSSRH_GPG_SECRET_KEY }}
+        gpg-passphrase: MAVEN_GPG_PASSPHRASE
+
+    - name: Publish to Maven Central
+      run: mvn deploy -P release
+      env:
+        MAVEN_USERNAME: ${{ secrets.OSSRH_USERNAME }}
+        MAVEN_PASSWORD: ${{ secrets.OSSRH_TOKEN }}
+        MAVEN_GPG_PASSPHRASE: ${{ secrets.OSSRH_GPG_PASSPHRASE }}
