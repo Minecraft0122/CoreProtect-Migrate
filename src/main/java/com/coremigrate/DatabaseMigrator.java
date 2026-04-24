@@ -25,8 +25,8 @@ public class DatabaseMigrator {
         System.out.println("Loading configuration from " + CONFIG_FILE);
         
         // 检查配置文件是否存在
-        File config = new File(CONFIG_FILE);
-        if (!config.exists()) {
+        File configFile = new File(CONFIG_FILE);
+        if (!configFile.exists()) {
             System.out.println("Configuration file not found! Creating example config...");
             createExampleConfig();
             System.out.println("Please edit migration.properties with your database details");
@@ -35,7 +35,7 @@ public class DatabaseMigrator {
         }
 
         // 加载配置
-        try (BufferedReader reader = new BufferedReader(new FileReader(CONFIG_FILE))) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(configFile))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isEmpty() || line.startsWith("#")) continue;
@@ -99,10 +99,18 @@ public class DatabaseMigrator {
     private Connection createConnection(String url, String user, String password, String type) throws SQLException {
         Connection connection;
         if (type.equals("sqlite")) {
-            Class.forName("org.sqlite.JDBC");
+            try {
+                Class.forName("org.sqlite.JDBC");
+            } catch (ClassNotFoundException e) {
+                throw new SQLException("SQLite JDBC driver not found", e);
+            }
             connection = DriverManager.getConnection(url);
         } else {
-            Class.forName("com.mysql.cj.jdbc.Driver");
+            try {
+                Class.forName("com.mysql.cj.jdbc.Driver");
+            } catch (ClassNotFoundException e) {
+                throw new SQLException("MySQL JDBC driver not found", e);
+            }
             connection = DriverManager.getConnection(url, user, password);
         }
         return connection;
@@ -356,7 +364,11 @@ public class DatabaseMigrator {
         
         for (Map.Entry<String, AtomicInteger> entry : progressMap.entrySet()) {
             totalProcessed += entry.getValue().get();
-            totalRecords += getRowCount(entry.getKey());
+            try {
+                totalRecords += getRowCount(entry.getKey());
+            } catch (SQLException e) {
+                System.err.println("Error getting row count for table " + entry.getKey() + ": " + e.getMessage());
+            }
         }
         
         double progress = totalRecords > 0 ? (double) totalProcessed / totalRecords : 0;
@@ -382,7 +394,12 @@ public class DatabaseMigrator {
         System.out.println("\nDetailed progress:");
         for (Map.Entry<String, AtomicInteger> entry : progressMap.entrySet()) {
             int processed = entry.getValue().get();
-            int total = getRowCount(entry.getKey());
+            int total = 0;
+            try {
+                total = getRowCount(entry.getKey());
+            } catch (SQLException e) {
+                System.err.println("Error getting row count for table " + entry.getKey() + ": " + e.getMessage());
+            }
             System.out.printf("  - %s: %d/%d records (%.1f%%)\n", entry.getKey(), processed, total, (total > 0) ? (processed * 100.0 / total) : 0);
         }
     }
